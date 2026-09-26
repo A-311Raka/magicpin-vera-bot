@@ -524,14 +524,18 @@ async def reply(body: ReplyBody):
 
     text = body.message
 
-    # 1. Auto-reply detection — try once more, then exit gracefully
+    # 1. Auto-reply detection — try once more, then exit gracefully.
+    # Uses a state flag rather than re-scanning history: re-checking each past
+    # message with is_auto_reply(msg, []) silently breaks, since that call's
+    # exact-repeat rule needs real history and an empty list always returns
+    # same_count=0 — so anything not matching the hardcoded keyword list would
+    # never increment and the bot would nudge forever. A flag is robust to any
+    # phrasing the judge/merchant actually sends.
     if is_auto_reply(text, convo["history"]):
-        auto_reply_nudges = sum(
-            1 for h in convo["history"] if h.get("from") in ("merchant",) and is_auto_reply(h.get("msg", ""), [])
-        )
-        if auto_reply_nudges >= 2:
+        if convo.get("auto_reply_nudged"):
             convo["ended"] = True
             return {"action": "end", "rationale": "Merchant channel is an auto-reply bot; ending to avoid wasting turns."}
+        convo["auto_reply_nudged"] = True
         reply_body = "Samajh gayi — team tak pahunchane se pehle, kya aap khud 2 min dekh sakte hain? Agar nahi, main directly owner se connect kar lungi."
         convo["history"].append({"from": convo["send_as"], "msg": reply_body})
         return {"action": "send", "body": reply_body, "cta": "open_ended",
