@@ -81,6 +81,14 @@ fired_suppression_keys: set[str] = set()
 # merchant_id -> count of consecutive sends with no reply (cooldown tracker)
 unanswered_nudges: dict[str, int] = {}
 
+# Auto-reply detection is tracked per MERCHANT, not per conversation: the judge
+# harness (and real WhatsApp usage) may address the same merchant through a new
+# conversation_id on every turn, so conversation-scoped state would never
+# accumulate. merchant_recent_texts holds every message seen from that merchant
+# across all conversations; merchant_auto_reply_nudged is the one-shot flag.
+merchant_recent_texts: dict[str, list[str]] = {}
+merchant_auto_reply_nudged: dict[str, bool] = {}
+
 
 def get_ctx(scope: str, context_id: str) -> Optional[dict]:
     entry = contexts.get((scope, context_id))
@@ -327,12 +335,12 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
-def is_auto_reply(text: str, history: list[dict]) -> bool:
+def is_auto_reply(text: str, prior_texts: list[str]) -> bool:
     norm = normalize(text)
     if any(p in norm for p in AUTO_REPLY_PATTERNS):
         return True
     # exact-repeat heuristic per the brief: same message verbatim 3+ times
-    same_count = sum(1 for h in history if h.get("from") == "merchant" and normalize(h.get("msg", "")) == norm)
+    same_count = sum(1 for t in prior_texts if normalize(t) == norm)
     return same_count >= 2  # this would be the 3rd occurrence
 
 
@@ -524,22 +532,30 @@ async def reply(body: ReplyBody):
 
     text = body.message
 
+    # Track this merchant's message history at the merchant level (not just
+    # conversation level) — see merchant_recent_texts comment above for why.
+    merchant_texts = merchant_recent_texts.setdefault(body.merchant_id, []) if body.merchant_id else []
+    prior_merchant_texts = list(merchant_texts)  # snapshot before appending current
+    if body.merchant_id:
+        merchant_texts.append(text)
+
     # 1. Auto-reply detection — try once more, then exit gracefully.
-    # Uses a state flag rather than re-scanning history: re-checking each past
-    # message with is_auto_reply(msg, []) silently breaks, since that call's
-    # exact-repeat rule needs real history and an empty list always returns
-    # same_count=0 — so anything not matching the hardcoded keyword list would
-    # never increment and the bot would nudge forever. A flag is robust to any
-    # phrasing the judge/merchant actually sends.
-    if is_auto_reply(text, convo["history"]):
-        if convo.get("auto_reply_nudged"):
+    # Checked against this merchant's full message history across every
+    # conversation_id they've ever used, since a new conversation_id per turn
+    # (real WhatsApp threads, or this judge harness) must not reset detection.
+    if is_auto_reply(text, prior_merchant_texts):
+        already_nudged = merchant_auto_reply_nudged.get(body.merchant_id, False)
+        if already_nudged:
             convo["ended"] = True
             return {"action": "end", "rationale": "Merchant channel is an auto-reply bot; ending to avoid wasting turns."}
-        convo["auto_reply_nudged"] = True
+        if body.merchant_id:
+            merchant_auto_reply_nudged[body.merchant_id] = True
         reply_body = "Samajh gayi — team tak pahunchane se pehle, kya aap khud 2 min dekh sakte hain? Agar nahi, main directly owner se connect kar lungi."
         convo["history"].append({"from": convo["send_as"], "msg": reply_body})
         return {"action": "send", "body": reply_body, "cta": "open_ended",
                 "rationale": "First auto-reply detected; one lightweight nudge before escalating/exiting."}
+    elif body.merchant_id:
+        merchant_auto_reply_nudged[body.merchant_id] = False  # genuine reply — reset the one-shot flag
 
     # 2. Hostile — apologize once and stop
     if is_hostile(text):
