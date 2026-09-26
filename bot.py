@@ -53,9 +53,9 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 _DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-4-5-20250929",
     "openai": "gpt-4o-mini",
-    "gemini": "gemini-2.0-flash",
+    "gemini": "gemini-3.5-flash",
 }
-LLM_MODEL = os.environ.get("LLM_MODEL", _DEFAULT_MODELS.get(LLM_PROVIDER, "gemini-2.0-flash"))
+LLM_MODEL = os.environ.get("LLM_MODEL", _DEFAULT_MODELS.get(LLM_PROVIDER, "gemini-3.5-flash"))
 TEAM_NAME = os.environ.get("TEAM_NAME", "Ajay")
 TEAM_MEMBERS = [os.environ.get("TEAM_MEMBER_1", "Ajay")]
 CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "you@example.com")
@@ -136,22 +136,31 @@ def llm_complete(system: str, user: str) -> str:
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     elif LLM_PROVIDER == "gemini":
+        # Uses Google's OpenAI-compatible endpoint rather than the native
+        # generateContent endpoint: Google's Sept-2026 auth-key migration
+        # (AI Studio now issues "AQ."-prefixed keys by default) has caused
+        # widespread 401 ACCESS_TOKEN_TYPE_UNSUPPORTED errors on the native
+        # REST endpoint for many accounts. The OpenAI-compatible endpoint
+        # uses a plain Bearer token and works with both old and new key
+        # formats, so it's the more reliable integration path right now.
         if not GEMINI_API_KEY:
             raise RuntimeError("GEMINI_API_KEY not set")
         resp = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{LLM_MODEL}:generateContent",
-            params={"key": GEMINI_API_KEY},
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            headers={"Authorization": f"Bearer {GEMINI_API_KEY}"},
             json={
-                "system_instruction": {"parts": [{"text": system}]},
-                "contents": [{"role": "user", "parts": [{"text": user}]}],
-                "generationConfig": {"temperature": 0, "maxOutputTokens": 500},
+                "model": LLM_MODEL,
+                "temperature": 0,
+                "max_tokens": 500,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
             },
             timeout=25,
         )
         resp.raise_for_status()
-        data = resp.json()
-        parts = data["candidates"][0]["content"]["parts"]
-        return "".join(p.get("text", "") for p in parts)
+        return resp.json()["choices"][0]["message"]["content"]
     else:
         raise RuntimeError(f"Unknown LLM_PROVIDER {LLM_PROVIDER}")
 
