@@ -46,13 +46,16 @@ from pydantic import BaseModel
 # Config
 # ---------------------------------------------------------------------------
 
-LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic")  # anthropic | openai
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic")  # anthropic | openai | gemini
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-LLM_MODEL = os.environ.get(
-    "LLM_MODEL",
-    "claude-sonnet-4-5-20250929" if LLM_PROVIDER == "anthropic" else "gpt-4o-mini",
-)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+_DEFAULT_MODELS = {
+    "anthropic": "claude-sonnet-4-5-20250929",
+    "openai": "gpt-4o-mini",
+    "gemini": "gemini-2.0-flash",
+}
+LLM_MODEL = os.environ.get("LLM_MODEL", _DEFAULT_MODELS.get(LLM_PROVIDER, "gemini-2.0-flash"))
 TEAM_NAME = os.environ.get("TEAM_NAME", "Ajay")
 TEAM_MEMBERS = [os.environ.get("TEAM_MEMBER_1", "Ajay")]
 CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "you@example.com")
@@ -132,6 +135,23 @@ def llm_complete(system: str, user: str) -> str:
         )
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
+    elif LLM_PROVIDER == "gemini":
+        if not GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY not set")
+        resp = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{LLM_MODEL}:generateContent",
+            params={"key": GEMINI_API_KEY},
+            json={
+                "system_instruction": {"parts": [{"text": system}]},
+                "contents": [{"role": "user", "parts": [{"text": user}]}],
+                "generationConfig": {"temperature": 0, "maxOutputTokens": 500},
+            },
+            timeout=25,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        parts = data["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts)
     else:
         raise RuntimeError(f"Unknown LLM_PROVIDER {LLM_PROVIDER}")
 
